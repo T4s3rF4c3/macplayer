@@ -2,6 +2,19 @@
 
 A desktop IPTV player for Stalker/MAC-based portals, built with PySide6 and VLC.
 
+## Download
+
+Pre-built binaries are available on the [Releases](../../releases/latest) page:
+
+| Platform | File |
+|---|---|
+| Windows | `MacPlayer-windows.zip` — extract and run `MacPlayer.exe` |
+| macOS | `MacPlayer.dmg` — open and drag to Applications |
+
+> **macOS note:** The app is unsigned. On first launch right-click → Open to bypass Gatekeeper.
+>
+> **Both platforms require [VLC](https://www.videolan.org/vlc/) to be installed.**
+
 ## Features
 
 - Connect to multiple Stalker Portal-based IPTV services
@@ -12,6 +25,7 @@ A desktop IPTV player for Stalker/MAC-based portals, built with PySide6 and VLC.
 - EPG (Electronic Programme Guide) panel
 - Proxy support per portal
 - EPG timezone offset per portal
+- Fullscreen mode (button or Escape key)
 - Dark UI with VLC-powered video playback
 - Stream status overlay (shows which MAC is being tried)
 - Config persisted to `~/.macplayer/config.json`
@@ -71,7 +85,9 @@ When **Try all MACs** is enabled MacPlayer will:
 
 ## Building
 
-Install build dependencies first:
+Pushing a `v*.*.*` tag triggers GitHub Actions to build both platforms and publish a release automatically.
+
+For local builds, install build dependencies first:
 
 ```bash
 pip install -r requirements-dev.txt
