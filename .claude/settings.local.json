@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -c \"import PySide6; print\\('PySide6 OK:', PySide6.__version__\\); import PySide6.QtWidgets; print\\('QtWidgets OK'\\)\")",
+      "PowerShell(python --version; python -c \"import sys; print\\(sys.executable\\)\")",
+      "PowerShell(python -m pip install PySide6)",
+      "PowerShell(python -c \"import PySide6; print\\('PySide6 OK:', PySide6.__version__\\)\")",
+      "PowerShell(python -m pip install requests python-vlc)"
+    ]
+  }
+}
