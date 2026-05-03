@@ -15,15 +15,17 @@ _LIST_STYLE = """
         outline: none;
     }
     QListWidget::item {
-        padding: 6px 10px;
-        border-bottom: 1px solid #252525;
+        padding: 8px 10px;
+        border-bottom: 1px solid #222;
+        min-height: 20px;
     }
     QListWidget::item:selected {
         background: #0078d4;
         color: white;
+        border-bottom-color: #0060aa;
     }
     QListWidget::item:hover:!selected {
-        background: #252525;
+        background: #242424;
     }
 """
 
@@ -109,7 +111,7 @@ class ChannelPanel(QWidget):
         # Channel list
         self.list_widget = QListWidget()
         self.list_widget.setStyleSheet(_LIST_STYLE)
-        self.list_widget.itemDoubleClicked.connect(self._on_double_click)
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.list_widget)
 
         self.setMinimumWidth(210)
@@ -174,5 +176,5 @@ class ChannelPanel(QWidget):
             f"{visible} of {total} channels" if total else "No channels loaded"
         )
 
-    def _on_double_click(self, item: _ChannelItem):
+    def _on_item_clicked(self, item: _ChannelItem):
         self.channel_selected.emit(item.channel_data)

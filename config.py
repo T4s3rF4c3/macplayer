@@ -46,6 +46,7 @@ class Config:
     def __init__(self):
         self.portals: List[Portal] = []
         self.volume: int = 80
+        self.last_portal_id: str = ""
         self.load()
 
     def load(self):
@@ -56,6 +57,7 @@ class Config:
                 data = json.load(f)
             self.portals = [Portal.from_dict(p) for p in data.get("portals", [])]
             self.volume = data.get("volume", 80)
+            self.last_portal_id = data.get("last_portal_id", "")
         except Exception as e:
             print(f"Config load error: {e}")
 
@@ -64,6 +66,7 @@ class Config:
         data = {
             "portals": [p.to_dict() for p in self.portals],
             "volume": self.volume,
+            "last_portal_id": self.last_portal_id,
         }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:

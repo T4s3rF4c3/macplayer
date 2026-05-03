@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QComboBox, QLabel, QPushButton, QMessageBox,
 )
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 from config import Config, Portal
 from worker import ChannelLoader, StreamResolver, EPGLoader
@@ -13,6 +13,7 @@ from ui.channel_panel import ChannelPanel
 from ui.player_widget import PlayerWidget
 from ui.epg_widget import EPGWidget
 from ui.portal_dialog import PortalDialog
+from ui.portal_manager import PortalManagerDialog
 
 _TOOLBAR_STYLE = """
     QToolBar {
@@ -91,6 +92,16 @@ class MainWindow(QMainWindow):
 
         self.player.set_volume(self.config.volume)
 
+        # Restore last used portal and auto-load its channels
+        if self.config.last_portal_id:
+            idx = self.portal_combo.findData(self.config.last_portal_id)
+            if idx >= 0:
+                self.portal_combo.blockSignals(True)
+                self.portal_combo.setCurrentIndex(idx)
+                self.portal_combo.blockSignals(False)
+        if self.portal_combo.currentData():
+            QTimer.singleShot(300, self._load_channels)
+
     # ------------------------------------------------------------------ UI ---
 
     def _build_central(self):
@@ -131,8 +142,7 @@ class MainWindow(QMainWindow):
 
         portals_menu = mb.addMenu("Portals")
         portals_menu.addAction("Add Portal…", self._add_portal)
-        portals_menu.addAction("Edit Portal…", self._edit_portal)
-        portals_menu.addAction("Remove Portal", self._remove_portal)
+        portals_menu.addAction("Manage Portals…", self._open_portal_manager)
         portals_menu.addSeparator()
         portals_menu.addAction("Reload Channels", self._load_channels)
 
@@ -175,6 +185,11 @@ class MainWindow(QMainWindow):
         btn_add.clicked.connect(self._add_portal)
         tb.addWidget(btn_add)
 
+        btn_manage = QPushButton("Manage Portals")
+        btn_manage.setStyleSheet(_BTN_SECONDARY)
+        btn_manage.clicked.connect(self._open_portal_manager)
+        tb.addWidget(btn_manage)
+
     def _build_statusbar(self):
         sb = QStatusBar()
         sb.setStyleSheet(
@@ -201,6 +216,11 @@ class MainWindow(QMainWindow):
         self.channel_panel.clear()
         self.player.stop()
         self.epg_widget.clear()
+        portal_id = self.portal_combo.currentData()
+        if portal_id:
+            self.config.last_portal_id = portal_id
+            self.config.save()
+            self._load_channels()
 
     # ----------------------------------------------------------- Portal CRUD ---
 
@@ -223,44 +243,22 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.portal_combo.setCurrentIndex(idx)
 
-    def _edit_portal(self):
-        portal_id = self.portal_combo.currentData()
-        if not portal_id:
-            QMessageBox.information(self, "Edit Portal", "No portal selected.")
-            return
-        portal = self.config.get_portal(portal_id)
-        if not portal:
-            return
-        dlg = PortalDialog(portal=portal, parent=self)
-        if dlg.exec() == PortalDialog.Accepted:
-            data = dlg.get_data()
-            portal.name = data["name"]
-            portal.url = data["url"]
-            portal.macs = data["macs"]
-            portal.proxy = data["proxy"]
-            portal.epg_offset = data["epg_offset"]
-            portal.try_all_macs = data["try_all_macs"]
-            self.config.update_portal(portal)
-            self._refresh_portal_combo()
+    def _open_portal_manager(self):
+        dlg = PortalManagerDialog(self.config, parent=self)
+        dlg.portals_changed.connect(self._on_portals_changed)
+        dlg.exec()
 
-    def _remove_portal(self):
-        portal_id = self.portal_combo.currentData()
-        if not portal_id:
-            return
-        portal = self.config.get_portal(portal_id)
-        if not portal:
-            return
-        reply = QMessageBox.question(
-            self, "Remove Portal",
-            f"Remove portal '{portal.name}'?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes:
-            self.config.remove_portal(portal_id)
+    def _on_portals_changed(self):
+        current_id = self.portal_combo.currentData()
+        self._refresh_portal_combo()
+        if current_id and self.config.get_portal(current_id):
+            idx = self.portal_combo.findData(current_id)
+            if idx >= 0:
+                self.portal_combo.setCurrentIndex(idx)
+        else:
             self.channel_panel.clear()
             self.player.stop()
             self.epg_widget.clear()
-            self._refresh_portal_combo()
 
     # ------------------------------------------------------ Channel loading ---
 
@@ -274,6 +272,7 @@ class MainWindow(QMainWindow):
             return
 
         self.btn_load.setEnabled(False)
+        self.btn_load.setText("Loading…")
         self.channel_panel.clear()
 
         self._channel_loader = ChannelLoader(portal)
@@ -285,10 +284,12 @@ class MainWindow(QMainWindow):
     def _on_channels_loaded(self, channels: list, genres: dict):
         self.channel_panel.load_channels(channels, genres)
         self.btn_load.setEnabled(True)
+        self.btn_load.setText("Load Channels")
         self.statusBar().showMessage(f"Loaded {len(channels)} channels")
 
     def _on_channel_error(self, msg: str):
         self.btn_load.setEnabled(True)
+        self.btn_load.setText("Load Channels")
         self.statusBar().showMessage(f"Error: {msg}")
         QMessageBox.critical(self, "Connection Error", msg)
 
@@ -391,6 +392,7 @@ class MainWindow(QMainWindow):
             self.statusBar().show()
             self.showNormal()
         self.player.set_fullscreen_icon(self._is_fullscreen)
+        self.player.set_autohide(self._is_fullscreen)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and self._is_fullscreen:

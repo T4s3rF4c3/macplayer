@@ -14,12 +14,10 @@ try:
 except Exception:
     pass
 
-# How long to wait for VLC to open a stream before giving up (seconds)
-_OPEN_TIMEOUT   = 12
-# How long a buffering stall may last before we treat it as failure (seconds)
-_BUFFER_TIMEOUT = 20
-# How long playback time must be frozen before we treat it as a dead stream (seconds)
-_FREEZE_TIMEOUT = 15
+_OPEN_TIMEOUT    = 12
+_BUFFER_TIMEOUT  = 20
+_FREEZE_TIMEOUT  = 15
+_AUTOHIDE_MS     = 3000
 
 _BTN = """
     QPushButton {{
@@ -49,34 +47,50 @@ _SLIDER = """
 
 
 class VideoFrame(QFrame):
-    """Black container that hosts VLC video output."""
+    mouse_moved    = Signal()
+    double_clicked = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet("background-color: black;")
         self.setMinimumSize(640, 360)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMouseTracking(True)
+
+    def mouseMoveEvent(self, event):
+        self.mouse_moved.emit()
+        super().mouseMoveEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self.double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
 
 
 class PlayerWidget(QWidget):
-    playback_failed = Signal()
+    playback_failed      = Signal()
     fullscreen_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setMouseTracking(True)
+
         self._vlc_instance  = None
         self._media_player  = None
         self._volume        = 80
         self._channel_name  = ""
 
-        # --- monitoring state (reset on every play_url call) ---
-        self._active: bool          = False
-        self._was_playing: bool     = False
-        self._start_time: float     = 0.0
+        self._active: bool                  = False
+        self._was_playing: bool             = False
+        self._start_time: float             = 0.0
+        self._play_start: float             = 0.0
         self._buffering_since: float | None = None
-        self._last_vlc_time: int    = -1   # ms reported by VLC
-        self._frozen_secs: int      = 0    # consecutive seconds without time advance
-        # Flag set from VLC callback thread; consumed by _monitor on Qt thread
-        self._vlc_error_flag: bool  = False
+        self._last_vlc_time: int            = -1
+        self._frozen_secs: int              = 0
+        self._vlc_error_flag: bool          = False
+        self._last_read_bytes: int          = 0
+
+        self._autohide: bool        = False
+        self._controls_hidden: bool = False
 
         self._setup_ui()
         self._setup_vlc()
@@ -84,6 +98,10 @@ class PlayerWidget(QWidget):
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._monitor)
         self._poll_timer.start(1000)
+
+        self._autohide_timer = QTimer(self)
+        self._autohide_timer.setSingleShot(True)
+        self._autohide_timer.timeout.connect(self._hide_controls)
 
     # ------------------------------------------------------------------ UI ---
 
@@ -93,6 +111,8 @@ class PlayerWidget(QWidget):
         layout.setSpacing(0)
 
         self.video_frame = VideoFrame(self)
+        self.video_frame.mouse_moved.connect(self._on_mouse_moved)
+        self.video_frame.double_clicked.connect(self.fullscreen_requested)
 
         self.placeholder = QLabel(
             "Select a channel to start playback\n\n"
@@ -106,10 +126,11 @@ class PlayerWidget(QWidget):
         )
         layout.addWidget(self.video_frame)
 
-        bar = QWidget()
-        bar.setFixedHeight(52)
-        bar.setStyleSheet("background: #1a1a1a; border-top: 1px solid #2e2e2e;")
-        bar_layout = QHBoxLayout(bar)
+        # Control bar
+        self._bar = QWidget()
+        self._bar.setFixedHeight(52)
+        self._bar.setStyleSheet("background: #1a1a1a; border-top: 1px solid #2e2e2e;")
+        bar_layout = QHBoxLayout(self._bar)
         bar_layout.setContentsMargins(10, 6, 10, 6)
         bar_layout.setSpacing(8)
 
@@ -126,8 +147,21 @@ class PlayerWidget(QWidget):
         self.ch_label = QLabel("")
         self.ch_label.setStyleSheet("color: #bbb; font-size: 13px;")
 
+        # Stats inline in the bar: elapsed time · bitrate · buffer state
+        self.stats_label = QLabel("")
+        self.stats_label.setStyleSheet(
+            "color: #666; font-size: 12px;"
+            "font-family: 'Consolas', 'Courier New', monospace;"
+        )
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedWidth(1)
+        sep.setFixedHeight(28)
+        sep.setStyleSheet("background: #333; border: none;")
 
         self.vol_icon = QLabel("🔊")
         self.vol_icon.setStyleSheet("font-size: 16px;")
@@ -142,14 +176,14 @@ class PlayerWidget(QWidget):
         self.btn_fs = QPushButton("⛶")
         self.btn_fs.setFixedSize(36, 36)
         self.btn_fs.setStyleSheet(_BTN.format(bg="#333", fs=17))
-        self.btn_fs.setToolTip("Toggle fullscreen")
+        self.btn_fs.setToolTip("Toggle fullscreen  (double-click video)")
         self.btn_fs.clicked.connect(self.fullscreen_requested)
 
-        for w in (self.btn_play, self.btn_stop, self.ch_label,
-                  spacer, self.vol_icon, self.volume_slider, self.btn_fs):
+        for w in (self.btn_play, self.btn_stop, self.ch_label, self.stats_label,
+                  spacer, sep, self.vol_icon, self.volume_slider, self.btn_fs):
             bar_layout.addWidget(w)
 
-        layout.addWidget(bar)
+        layout.addWidget(self._bar)
 
     # ----------------------------------------------------------------- VLC ---
 
@@ -177,7 +211,6 @@ class PlayerWidget(QWidget):
             self._media_player.set_xwindow(wid)
 
     def _register_vlc_events(self):
-        """Subscribe to VLC error/end events. Callbacks run on VLC's internal thread."""
         em = self._media_player.event_manager()
         for event_type in (
             vlc.EventType.MediaPlayerEncounteredError,
@@ -187,9 +220,73 @@ class PlayerWidget(QWidget):
             em.event_attach(event_type, self._on_vlc_event)
 
     def _on_vlc_event(self, event):
-        """Called from VLC thread — only set a flag; Qt UI touched in _monitor."""
         if self._active:
             self._vlc_error_flag = True
+
+    # -------------------------------------------------------------- Auto-hide ---
+
+    def set_autohide(self, enabled: bool):
+        self._autohide = enabled
+        if enabled:
+            self._autohide_timer.start(_AUTOHIDE_MS)
+        else:
+            self._autohide_timer.stop()
+            self._show_controls()
+
+    def _on_mouse_moved(self):
+        if self._autohide:
+            self._show_controls()
+            self._autohide_timer.start(_AUTOHIDE_MS)
+
+    def _hide_controls(self):
+        self._controls_hidden = True
+        self._bar.hide()
+        self.setCursor(Qt.BlankCursor)
+
+    def _show_controls(self):
+        self._controls_hidden = False
+        self._bar.show()
+        self.setCursor(Qt.ArrowCursor)
+
+    def mouseMoveEvent(self, event):
+        self._on_mouse_moved()
+        super().mouseMoveEvent(event)
+
+    # ----------------------------------------------------------------- Stats ---
+
+    def _update_stats(self):
+        if not self._was_playing or not self._active:
+            self.stats_label.setText("")
+            return
+
+        parts = []
+
+        elapsed = int(time.monotonic() - self._play_start) if self._play_start > 0 else 0
+        h, rem  = divmod(elapsed, 3600)
+        m, s    = divmod(rem, 60)
+        parts.append(f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}")
+
+        # Bitrate via read_bytes delta — avoids VLC's unreliable input_bitrate float
+        if self._media_player and VLC_AVAILABLE:
+            try:
+                media = self._media_player.get_media()
+                if media:
+                    st = vlc.MediaStats()
+                    if media.get_stats(st) and st.read_bytes > 0:
+                        delta = st.read_bytes - self._last_read_bytes
+                        if self._last_read_bytes > 0 and delta > 0:
+                            kbps = delta * 8 / 1000
+                            parts.append(
+                                f"{kbps / 1000:.1f} Mbps" if kbps >= 1000 else f"{kbps:.0f} kbps"
+                            )
+                        self._last_read_bytes = st.read_bytes
+            except Exception:
+                pass
+
+        if self._buffering_since is not None:
+            parts.append("Buffering…")
+
+        self.stats_label.setText("  ·  ".join(parts))
 
     # --------------------------------------------------------------- Public ---
 
@@ -201,17 +298,19 @@ class PlayerWidget(QWidget):
         self.placeholder.show()
 
     def play_url(self, url: str, channel_name: str = ""):
-        # Reset all monitoring state before starting a new stream
         self._active          = True
         self._was_playing     = False
         self._start_time      = time.monotonic()
+        self._play_start      = 0.0
         self._buffering_since = None
         self._last_vlc_time   = -1
         self._frozen_secs     = 0
         self._vlc_error_flag  = False
+        self._last_read_bytes = 0
 
         self._channel_name = channel_name
         self.ch_label.setText(channel_name)
+        self.stats_label.setText("")
         self.show_status(f"Loading stream…\n{channel_name}", "#888")
 
         if self._media_player is None:
@@ -234,12 +333,13 @@ class PlayerWidget(QWidget):
             self._media_player.play()
 
     def stop(self):
-        self._active = False          # must be set BEFORE calling vlc stop()
-        self._vlc_error_flag = False  # discard any pending event
+        self._active         = False
+        self._vlc_error_flag = False
         if self._media_player:
             self._media_player.stop()
         self.btn_play.setText("▶")
         self.ch_label.setText("")
+        self.stats_label.setText("")
         self._channel_name = ""
         self.show_status("Select a channel to start playback")
 
@@ -262,16 +362,13 @@ class PlayerWidget(QWidget):
     # -------------------------------------------------------------- Private ---
 
     def _fail(self):
-        """Mark stream failed and signal main window to try next MAC."""
         self._active = False
         self.playback_failed.emit()
 
     def _monitor(self):
-        """Runs every second on the Qt thread — detects stream failures."""
         if not self._media_player:
             return
 
-        # --- VLC event flag (set from VLC internal thread) ---
         if self._vlc_error_flag:
             self._vlc_error_flag = False
             if self._active:
@@ -284,25 +381,31 @@ class PlayerWidget(QWidget):
         if is_playing:
             if self.placeholder.isVisible():
                 self.placeholder.hide()
+            if not self._was_playing:
+                self._play_start = time.monotonic()
             self._was_playing     = True
             self._buffering_since = None
 
-            # Detect frozen stream: check that VLC's playback clock advances
             vlc_time = self._media_player.get_time()
             if vlc_time > 0:
                 if vlc_time == self._last_vlc_time:
                     self._frozen_secs += 1
                     if self._frozen_secs >= _FREEZE_TIMEOUT:
+                        self._update_stats()
                         self._fail()
+                        return
                 else:
                     self._last_vlc_time = vlc_time
                     self._frozen_secs   = 0
+
+            self._update_stats()
             return
+
+        self._update_stats()
 
         if not self._active:
             return
 
-        # --- State-based timeout checks ---
         now   = time.monotonic()
         state = self._media_player.get_state()
 
@@ -310,7 +413,6 @@ class PlayerWidget(QWidget):
             self._fail()
 
         elif state in (vlc.State.Ended, vlc.State.Stopped):
-            # Unexpected stop/end — fail regardless of whether we were playing
             self._fail()
 
         elif state == vlc.State.Buffering:
