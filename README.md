@@ -15,6 +15,10 @@ Pre-built binaries are available on the [Releases](../../releases/latest) page:
 >
 > **Both platforms require [VLC](https://www.videolan.org/vlc/) to be installed.**
 
+## Preview
+
+![MacPlayer Overview](img/OverView.png)
+
 ## Features
 
 - Connect to multiple Stalker Portal-based IPTV services
